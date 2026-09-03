@@ -1,0 +1,21 @@
+[mcp_servers.local_ai]
+command = 'C:\Path\To\Python\python.exe'
+args = ['C:\Path\To\codex-local-ai-helper\src\local_ai_mcp.py']
+env_vars = [
+  "OPENWEBUI_URL",
+  "OPENWEBUI_API_KEY",
+  "OPENWEBUI_DEFAULT_MODEL",
+  "OPENWEBUI_DEFAULT_WEB_MODEL",
+  "LOCAL_AI_MODEL_CACHE_TTL_SEC",
+  "LOCAL_AI_HTTP_TIMEOUT_SEC",
+  "LOCAL_AI_LOCK_WAIT_TIMEOUT_SEC",
+  "LOCAL_AI_MAX_AUTO_QUERIES",
+  "LOCAL_AI_DEFAULT_SEARCH_RESULTS",
+  "LOCAL_AI_MAX_SEARCH_RESULTS",
+  "LOCAL_AI_MAX_RESEARCH_ROUNDS",
+  "LOCAL_AI_MAX_TOTAL_RESEARCH_RESULTS",
+  "LOCAL_AI_MUTEX_NAME"
+]
+startup_timeout_sec = 15
+tool_timeout_sec = 660
+enabled = true

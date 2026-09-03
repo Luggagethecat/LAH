@@ -1,0 +1,22 @@
+{
+  "version": "0.1.0",
+  "sanitization_hits": [],
+  "files": [
+    ".gitignore",
+    "CHANGELOG.md",
+    "DISCLAIMER.md",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md",
+    "config/codex-config.example.toml",
+    "config/env.example",
+    "docs/alternative-backends.md",
+    "docs/architecture.md",
+    "docs/troubleshooting.md",
+    "prompts/AGENTS.example.md",
+    "prompts/codex-project-prompt.md",
+    "requirements.txt",
+    "src/local_ai_mcp.py",
+    "tests/smoke-test.md"
+  ]
+}

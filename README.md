@@ -88,4 +88,4 @@ This is an early community/vibe-coded project, iteratively tested with real loca
 
 ## Licence
 
-MIT.
+GNU GENERAL PUBLIC LICENSE.

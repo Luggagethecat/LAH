@@ -1,10 +1,10 @@
-# Codex Local AI Helper
+# Local AI Helper for Codex
 
-A low-privilege MCP helper that lets Codex use local LLM resources for bounded coding, review, research, summarisation, test ideas and other supporting work.
+LAH a local low-privilege MCP helper that lets Codex use local LLM resources for bounded coding, review, research, summarisation, test ideas and other supporting work.
 
-The goal is **better use of local compute and better final results**. Reduced primary-model context or token usage may be a side benefit in some workflows, but this project does not promise or guarantee token savings.
+The goal of LAH is **better use of local compute and better final results**. Reduced primary-model context or token usage may be a side benefit in some workflows, but this project does not promise or guarantee token savings.
 
-## What it does
+## What LAH does
 
 - Gives Codex a local AI sub-agent through MCP.
 - Lets Codex delegate first-pass coding, code review, test ideas, debugging hypotheses, summarisation and research.

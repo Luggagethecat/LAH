@@ -1,81 +1,91 @@
-# Alternative local model backends
+# Local model backends
 
-The reference MCP bridge uses OpenWebUI because it combines model access and deterministic search cleanly. The same architecture can also use local Ollama or GPT4All for inference.
+The bridge supports three inference backends:
+
+- `openwebui`
+- `ollama`
+- `gpt4all`
+
+Set the backend with:
+
+```text
+LOCAL_AI_BACKEND=openwebui
+```
+
+or `ollama` / `gpt4all`.
+
+## OpenWebUI
+
+OpenWebUI is the reference research-oriented backend because it can provide both model access and deterministic web retrieval.
+
+Typical base URL:
+
+```text
+http://127.0.0.1:3000
+```
+
+Set `OPENWEBUI_API_KEY` in the host environment or forward it through Codex. Do not hard-code real API keys in a public repository.
 
 ## Direct Ollama
 
-Ollama's local API normally listens at:
+Ollama normally listens at:
 
 ```text
-http://127.0.0.1:11434/api
+http://127.0.0.1:11434
 ```
 
-List models:
+The bridge uses:
 
-```bash
-curl http://127.0.0.1:11434/api/tags
+```text
+GET  /api/tags
+POST /api/chat
 ```
 
-Chat:
+Useful tuning variables:
 
-```bash
-curl http://127.0.0.1:11434/api/chat -d '{
-  "model": "YOUR_MODEL",
-  "messages": [{"role":"user","content":"Reply exactly OK"}],
-  "stream": false,
-  "keep_alive": "60s"
-}'
+```text
+OLLAMA_KEEP_ALIVE=10m
+OLLAMA_NUM_CTX=4096
+OLLAMA_NUM_PREDICT=1024
 ```
 
-Ollama supports `keep_alive`, which is useful when a GPU is shared with other workloads. `0` requests immediate unload after the response; a short value such as `60s` keeps the model warm briefly.
-
-A direct Ollama adapter for this project needs to replace the OpenWebUI model-list/chat functions with `/api/tags` and `/api/chat`. The MCP security and orchestration model can remain unchanged.
+A modest `OLLAMA_NUM_CTX` can be useful on older/smaller GPUs. `keep_alive` amortises cold model-load time when repeated delegated tasks are expected.
 
 ## GPT4All Desktop
 
-GPT4All provides a local OpenAI-compatible API server.
-
-In GPT4All Desktop:
-1. Open **Settings**.
-2. Go to **Application**.
-3. Scroll to **Advanced**.
-4. Enable **Local API Server**.
-5. The default base URL is:
+GPT4All can expose an OpenAI-compatible local API, commonly at:
 
 ```text
 http://127.0.0.1:4891/v1
 ```
 
-List models:
-
-```bash
-curl http://127.0.0.1:4891/v1/models
-```
-
-Chat completion:
-
-```bash
-curl http://127.0.0.1:4891/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "YOUR_MODEL",
-    "messages": [{"role":"user","content":"Reply exactly OK"}]
-  }'
-```
-
-GPT4All's local API is designed for local use and normally listens on `127.0.0.1`. If Codex runs on another machine, secure the connection instead of simply exposing the API publicly.
-
-## Web research with direct Ollama or GPT4All
-
-Inference and retrieval are separate concerns.
-
-A useful mixed architecture is:
+Enable the Local API Server in GPT4All Desktop, then use:
 
 ```text
-Codex -> MCP -> Ollama or GPT4All  (local inference)
-             -> OpenWebUI/SearXNG (deterministic search)
+LOCAL_AI_BACKEND=gpt4all
+GPT4ALL_URL=http://127.0.0.1:4891/v1
 ```
 
-This lets users keep their preferred local inference engine while preserving the project's evidence-based web-research design.
+## Search is separate from inference
 
-If no deterministic search backend is available, local inference should remain offline and fail cleanly when current external evidence is required rather than allowing the model to pretend it searched.
+`SEARCH_BACKEND` is independent from `LOCAL_AI_BACKEND`.
+
+For example, a worker may use direct Ollama for inference while still using OpenWebUI/SearXNG for deterministic search:
+
+```text
+LOCAL_AI_BACKEND=ollama
+SEARCH_BACKEND=openwebui
+SEARCH_OPENWEBUI_URL=http://YOUR-SERVER:3000
+```
+
+Or a coding-only worker can disable search:
+
+```text
+SEARCH_BACKEND=none
+```
+
+When current evidence is required but no deterministic search backend is configured, the bridge should fail cleanly rather than allowing a local model to pretend it searched.
+
+## Network exposure
+
+Prefer localhost or a trusted management network. Do not expose unauthenticated Ollama or GPT4All APIs directly to the public Internet.

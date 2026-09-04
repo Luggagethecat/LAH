@@ -1,21 +1,43 @@
-[mcp_servers.local_ai]
+# Example dual-worker Codex MCP configuration for LAH.
+# Adjust paths, endpoints and models for your environment.
+#
+# The workers intentionally use DIFFERENT mutex names. Each worker allows one
+# active inference at a time, while the two workers may run concurrently.
+
+[mcp_servers.server_research_agent]
 command = 'C:\Path\To\Python\python.exe'
-args = ['C:\Path\To\codex-local-ai-helper\src\local_ai_mcp.py']
-env_vars = [
-  "OPENWEBUI_URL",
-  "OPENWEBUI_API_KEY",
-  "OPENWEBUI_DEFAULT_MODEL",
-  "OPENWEBUI_DEFAULT_WEB_MODEL",
-  "LOCAL_AI_MODEL_CACHE_TTL_SEC",
-  "LOCAL_AI_HTTP_TIMEOUT_SEC",
-  "LOCAL_AI_LOCK_WAIT_TIMEOUT_SEC",
-  "LOCAL_AI_MAX_AUTO_QUERIES",
-  "LOCAL_AI_DEFAULT_SEARCH_RESULTS",
-  "LOCAL_AI_MAX_SEARCH_RESULTS",
-  "LOCAL_AI_MAX_RESEARCH_ROUNDS",
-  "LOCAL_AI_MAX_TOTAL_RESEARCH_RESULTS",
-  "LOCAL_AI_MUTEX_NAME"
-]
+args = ['C:\Path\To\LAH\src\local_ai_mcp.py']
+env_vars = ["OPENWEBUI_API_KEY"]
 startup_timeout_sec = 15
 tool_timeout_sec = 660
 enabled = true
+
+[mcp_servers.server_research_agent.env]
+LOCAL_AI_BACKEND = "openwebui"
+OPENWEBUI_URL = "http://YOUR-SERVER:3000"
+LOCAL_AI_DEFAULT_MODEL = "llama3:latest"
+LOCAL_AI_RESEARCH_MODEL = "llama3:latest"
+SEARCH_BACKEND = "openwebui"
+LOCAL_AI_HTTP_TIMEOUT_SEC = "300"
+LOCAL_AI_LOCK_WAIT_TIMEOUT_SEC = "300"
+LOCAL_AI_MUTEX_NAME = 'Local\ServerResearchAgentInference'
+
+
+[mcp_servers.laptop_coding_agent]
+command = 'C:\Path\To\Python\python.exe'
+args = ['C:\Path\To\LAH\src\local_ai_mcp.py']
+startup_timeout_sec = 15
+tool_timeout_sec = 660
+enabled = true
+
+[mcp_servers.laptop_coding_agent.env]
+LOCAL_AI_BACKEND = "ollama"
+OLLAMA_URL = "http://127.0.0.1:11434"
+OLLAMA_KEEP_ALIVE = "10m"
+OLLAMA_NUM_CTX = "4096"
+OLLAMA_NUM_PREDICT = "1024"
+LOCAL_AI_DEFAULT_MODEL = "qwen2.5-coder:7b"
+SEARCH_BACKEND = "none"
+LOCAL_AI_HTTP_TIMEOUT_SEC = "300"
+LOCAL_AI_LOCK_WAIT_TIMEOUT_SEC = "300"
+LOCAL_AI_MUTEX_NAME = 'Local\LaptopCodingAgentInference'

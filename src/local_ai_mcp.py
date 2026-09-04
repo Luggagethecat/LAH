@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-only
+
 import ctypes
 import json
 import os
@@ -15,7 +17,7 @@ from mcp.server import MCPServer
 
 # =============================================================================
 # Codex Local AI Helper Bridge
-# Version 1.3.0
+# Generic multi-backend bridge, version 0.2.0
 #
 # Design:
 #   Codex -> MCP bridge -> local OpenWebUI/Ollama model
@@ -26,11 +28,34 @@ from mcp.server import MCPServer
 # trusted merely because it claims that it searched the web.
 # =============================================================================
 
-BRIDGE_VERSION = "0.1.0"
+BRIDGE_VERSION = "0.2.0"
+
+# Model inference backend. Supported: openwebui | ollama | gpt4all
+BACKEND = os.getenv("LOCAL_AI_BACKEND", "openwebui").strip().lower()
 
 OPENWEBUI_URL = os.getenv("OPENWEBUI_URL", "http://127.0.0.1:3000").rstrip("/")
-DEFAULT_MODEL = os.getenv("OPENWEBUI_DEFAULT_MODEL", "")
-DEFAULT_WEB_MODEL = os.getenv("OPENWEBUI_DEFAULT_WEB_MODEL", "")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+GPT4ALL_URL = os.getenv("GPT4ALL_URL", "http://127.0.0.1:4891/v1").rstrip("/")
+
+# Generic names with compatibility fallbacks for the older OpenWebUI bridge.
+DEFAULT_MODEL = os.getenv(
+    "LOCAL_AI_DEFAULT_MODEL",
+    os.getenv("OPENWEBUI_DEFAULT_MODEL", ""),
+).strip()
+DEFAULT_WEB_MODEL = os.getenv(
+    "LOCAL_AI_RESEARCH_MODEL",
+    os.getenv("OPENWEBUI_DEFAULT_WEB_MODEL", ""),
+).strip()
+
+# Ollama tuning. 4096 is intentionally conservative for smaller/older GPUs.
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "10m")
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "4096"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "1024"))
+
+# Search is deliberately separate from model inference.
+_default_search_backend = "openwebui" if BACKEND == "openwebui" else "none"
+SEARCH_BACKEND = os.getenv("SEARCH_BACKEND", _default_search_backend).strip().lower()
+SEARCH_OPENWEBUI_URL = os.getenv("SEARCH_OPENWEBUI_URL", OPENWEBUI_URL).rstrip("/")
 
 MODEL_CACHE_TTL_SEC = float(os.getenv("LOCAL_AI_MODEL_CACHE_TTL_SEC", "15"))
 HTTP_TIMEOUT_SEC = int(os.getenv("LOCAL_AI_HTTP_TIMEOUT_SEC", "180"))
@@ -43,15 +68,15 @@ MAX_SNIPPET_CHARS = int(os.getenv("LOCAL_AI_MAX_SNIPPET_CHARS", "500"))
 MAX_RESEARCH_ROUNDS = int(os.getenv("LOCAL_AI_MAX_RESEARCH_ROUNDS", "2"))
 MAX_TOTAL_RESEARCH_RESULTS = int(os.getenv("LOCAL_AI_MAX_TOTAL_RESEARCH_RESULTS", "10"))
 
-# One inference slot shared across every bridge process on this Windows machine.
+# Each physical worker should use a different mutex name so separate GPUs can
+# work concurrently while a single worker still serializes its own inference.
 MUTEX_NAME = os.getenv(
     "LOCAL_AI_MUTEX_NAME",
-    r"Local\CodexOpenWebUILocalAIInference",
+    r"Local\CodexLocalAIInference",
 )
 
-
 MODEL_PROFILES: dict[str, dict[str, Any]] = {
-    "": {
+    "qwen2.5-coder:7b": {
         "recommended_for": [
             "code generation",
             "debugging",
@@ -69,7 +94,59 @@ MODEL_PROFILES: dict[str, dict[str, Any]] = {
             "current": 30,
         },
     },
-    "": {
+    "qwen2.5-coder:latest": {
+        "recommended_for": [
+            "code generation",
+            "debugging",
+            "code review",
+            "unit-test ideas",
+        ],
+        "priority": {
+            "code": 120,
+            "debugging": 120,
+            "tests": 115,
+            "review": 110,
+            "general": 55,
+            "research": 35,
+            "web": 30,
+            "current": 30,
+        },
+    },
+    "qwen3-coder:latest": {
+        "recommended_for": [
+            "code generation",
+            "debugging",
+            "code review",
+            "unit-test ideas",
+        ],
+        "priority": {
+            "code": 120,
+            "debugging": 120,
+            "tests": 115,
+            "review": 110,
+            "general": 60,
+            "research": 40,
+            "web": 35,
+            "current": 35,
+        },
+    },
+    "deepcoder:latest": {
+        "recommended_for": [
+            "code generation",
+            "debugging",
+            "code review",
+            "reasoning about code",
+        ],
+        "priority": {
+            "code": 115,
+            "debugging": 115,
+            "tests": 105,
+            "review": 110,
+            "reasoning": 90,
+            "general": 55,
+        },
+    },
+    "llama3:latest": {
         "recommended_for": [
             "general reasoning",
             "research synthesis",
@@ -142,8 +219,10 @@ mcp = MCPServer(
         "Private local sub-agent. ask_local_ai can answer offline or perform bounded iterative "
         "research using deterministic web searches. web_mode=auto lets it request current evidence; "
         "required forces research; never forbids it. The helper may inspect real search evidence and "
-        "request follow-up searches, but the bridge executes every search. One local inference runs "
-        "globally at once. Codex owns security, integration, verification and final tests."
+        "request follow-up searches, but the bridge executes every search. This MCP worker permits "
+        "only one inference at a time. Other local MCP workers using different mutex names and "
+        "independent compute resources may run concurrently. Codex owns security, integration, "
+        "verification and final tests."
     ),
 )
 
@@ -161,34 +240,33 @@ def _log(message: str) -> None:
     print(f"[local_ai] {message}", file=sys.stderr, flush=True)
 
 
-def _api_key() -> str:
-    key = os.getenv("OPENWEBUI_API_KEY")
+def _openwebui_api_key(*, search: bool = False) -> str:
+    if search:
+        key = os.getenv("SEARCH_OPENWEBUI_API_KEY") or os.getenv("OPENWEBUI_API_KEY")
+    else:
+        key = os.getenv("OPENWEBUI_API_KEY")
+
     if not key:
-        raise RuntimeError(
-            "[CONFIG_MISSING_API_KEY] OPENWEBUI_API_KEY is not set."
-        )
+        which = "SEARCH_OPENWEBUI_API_KEY/OPENWEBUI_API_KEY" if search else "OPENWEBUI_API_KEY"
+        raise RuntimeError(f"[CONFIG_MISSING_API_KEY] {which} is not set.")
     return key
 
 
-def _request_json(
-    path: str,
+def _request_json_url(
+    url: str,
     method: str = "GET",
     payload: dict[str, Any] | None = None,
     timeout: int | None = None,
+    headers: dict[str, str] | None = None,
 ) -> Any:
-    headers = {"Authorization": f"Bearer {_api_key()}"}
+    request_headers = dict(headers or {})
     data = None
 
     if payload is not None:
-        headers["Content-Type"] = "application/json"
+        request_headers["Content-Type"] = "application/json"
         data = json.dumps(payload).encode("utf-8")
 
-    request = urllib.request.Request(
-        f"{OPENWEBUI_URL}{path}",
-        data=data,
-        headers=headers,
-        method=method,
-    )
+    request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
 
     try:
         with urllib.request.urlopen(
@@ -199,13 +277,9 @@ def _request_json(
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         _log(f"HTTP {exc.code}: {detail[:500]}")
-        raise RuntimeError(
-            f"[OPENWEBUI_HTTP_ERROR] HTTP {exc.code}: {detail[:1200]}"
-        ) from exc
+        raise RuntimeError(f"[BACKEND_HTTP_ERROR] HTTP {exc.code}: {detail[:1200]}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(
-            f"[OPENWEBUI_UNREACHABLE] Could not reach {OPENWEBUI_URL}: {exc.reason}"
-        ) from exc
+        raise RuntimeError(f"[BACKEND_UNREACHABLE] Could not reach {url}: {exc.reason}") from exc
 
     if not raw:
         return None
@@ -215,10 +289,43 @@ def _request_json(
     except json.JSONDecodeError as exc:
         preview = raw.decode("utf-8", errors="replace")[:500]
         _log(f"Invalid JSON: {preview}")
-        raise RuntimeError(
-            "[OPENWEBUI_INVALID_JSON] OpenWebUI returned invalid JSON."
-        ) from exc
+        raise RuntimeError("[BACKEND_INVALID_JSON] Backend returned invalid JSON.") from exc
 
+
+def _openwebui_request(
+    path: str,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    timeout: int | None = None,
+) -> Any:
+    return _request_json_url(
+        f"{OPENWEBUI_URL}{path}",
+        method=method,
+        payload=payload,
+        timeout=timeout,
+        headers={"Authorization": f"Bearer {_openwebui_api_key()}"},
+    )
+
+
+def _search_request(
+    path: str,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    timeout: int | None = None,
+) -> Any:
+    if SEARCH_BACKEND != "openwebui":
+        raise RuntimeError("[SEARCH_UNAVAILABLE] No deterministic search backend is configured.")
+    return _request_json_url(
+        f"{SEARCH_OPENWEBUI_URL}{path}",
+        method=method,
+        payload=payload,
+        timeout=timeout,
+        headers={"Authorization": f"Bearer {_openwebui_api_key(search=True)}"},
+    )
+
+
+def _search_available() -> bool:
+    return SEARCH_BACKEND == "openwebui"
 
 # =============================================================================
 # Model inventory / routing
@@ -235,36 +342,63 @@ def _profile_for(model_id: str) -> dict[str, Any]:
 
 
 def _fetch_local_models() -> list[dict[str, Any]]:
-    data = _request_json("/api/models", timeout=30)
     models: list[dict[str, Any]] = []
 
-    for item in (data or {}).get("data", []):
-        if item.get("owned_by") != "ollama":
-            continue
-        if item.get("connection_type") != "local":
-            continue
-
-        model_id = item.get("id")
-        if not model_id:
-            continue
-
-        details = (item.get("ollama") or {}).get("details") or {}
-        profile = _profile_for(model_id)
-
-        models.append(
-            {
+    if BACKEND == "openwebui":
+        data = _openwebui_request("/api/models", timeout=30)
+        for item in (data or {}).get("data", []):
+            model_id = item.get("id")
+            if not model_id:
+                continue
+            details = (item.get("ollama") or {}).get("details") or {}
+            profile = _profile_for(model_id)
+            models.append({
                 "id": model_id,
                 "name": item.get("name", model_id),
+                "backend": "openwebui",
                 "parameter_size": details.get("parameter_size"),
                 "quantization": details.get("quantization_level"),
                 "loaded": bool(item.get("loaded")),
                 "preset": bool(item.get("preset")),
                 "recommended_for": profile["recommended_for"],
-            }
-        )
+            })
+        return models
 
-    return models
+    if BACKEND == "ollama":
+        data = _request_json_url(f"{OLLAMA_URL}/api/tags", timeout=30)
+        for item in (data or {}).get("models", []):
+            model_id = item.get("name") or item.get("model")
+            if not model_id:
+                continue
+            details = item.get("details") or {}
+            profile = _profile_for(model_id)
+            models.append({
+                "id": model_id,
+                "name": model_id,
+                "backend": "ollama",
+                "parameter_size": details.get("parameter_size"),
+                "quantization": details.get("quantization_level"),
+                "context_length": details.get("context_length"),
+                "recommended_for": profile["recommended_for"],
+            })
+        return models
 
+    if BACKEND == "gpt4all":
+        data = _request_json_url(f"{GPT4ALL_URL}/models", timeout=30)
+        for item in (data or {}).get("data", []):
+            model_id = item.get("id")
+            if not model_id:
+                continue
+            profile = _profile_for(model_id)
+            models.append({
+                "id": model_id,
+                "name": model_id,
+                "backend": "gpt4all",
+                "recommended_for": profile["recommended_for"],
+            })
+        return models
+
+    raise RuntimeError("[INVALID_BACKEND] LOCAL_AI_BACKEND must be openwebui, ollama, or gpt4all.")
 
 def _local_models(force_refresh: bool = False) -> list[dict[str, Any]]:
     now = time.monotonic()
@@ -372,7 +506,7 @@ def _resolve_model(
 
 
 # =============================================================================
-# Windows global inference mutex
+# Windows per-worker inference mutex
 # =============================================================================
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -460,43 +594,84 @@ def _run_model(
     *,
     temperature: float = 0.1,
 ) -> dict[str, Any]:
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": temperature,
-        "stream": False,
-    }
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
 
     with _single_inference_slot() as wait_seconds:
         started = time.monotonic()
-        data = _request_json(
-            "/api/chat/completions",
-            method="POST",
-            payload=payload,
-            timeout=HTTP_TIMEOUT_SEC,
-        )
-        inference_seconds = round(time.monotonic() - started, 3)
 
-    try:
-        choice = data["choices"][0]
-        content = choice["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(
-            "[OPENWEBUI_UNEXPECTED_RESPONSE] "
-            + json.dumps(data, ensure_ascii=False, default=str)[:2000]
-        ) from exc
+        if BACKEND == "openwebui":
+            data = _openwebui_request(
+                "/api/chat/completions",
+                method="POST",
+                payload={"model": model, "messages": messages, "temperature": temperature, "stream": False},
+                timeout=HTTP_TIMEOUT_SEC,
+            )
+            try:
+                choice = data["choices"][0]
+                content = choice["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise RuntimeError("[OPENWEBUI_UNEXPECTED_RESPONSE] " + json.dumps(data, ensure_ascii=False, default=str)[:2000]) from exc
+            finish_reason = choice.get("finish_reason")
+            usage = data.get("usage")
+
+        elif BACKEND == "ollama":
+            options: dict[str, Any] = {"temperature": temperature, "num_ctx": OLLAMA_NUM_CTX}
+            if OLLAMA_NUM_PREDICT > 0:
+                options["num_predict"] = OLLAMA_NUM_PREDICT
+            data = _request_json_url(
+                f"{OLLAMA_URL}/api/chat",
+                method="POST",
+                payload={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False,
+                    "keep_alive": OLLAMA_KEEP_ALIVE,
+                    "options": options,
+                },
+                timeout=HTTP_TIMEOUT_SEC,
+            )
+            content = ((data or {}).get("message") or {}).get("content", "")
+            if not isinstance(content, str):
+                raise RuntimeError("[OLLAMA_UNEXPECTED_RESPONSE] " + json.dumps(data, ensure_ascii=False, default=str)[:2000])
+            finish_reason = (data or {}).get("done_reason")
+            usage = {
+                "prompt_eval_count": (data or {}).get("prompt_eval_count"),
+                "eval_count": (data or {}).get("eval_count"),
+                "total_duration_ns": (data or {}).get("total_duration"),
+                "load_duration_ns": (data or {}).get("load_duration"),
+                "prompt_eval_duration_ns": (data or {}).get("prompt_eval_duration"),
+                "eval_duration_ns": (data or {}).get("eval_duration"),
+            }
+
+        elif BACKEND == "gpt4all":
+            data = _request_json_url(
+                f"{GPT4ALL_URL}/chat/completions",
+                method="POST",
+                payload={"model": model, "messages": messages, "temperature": temperature, "stream": False},
+                timeout=HTTP_TIMEOUT_SEC,
+            )
+            try:
+                choice = data["choices"][0]
+                content = choice["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise RuntimeError("[GPT4ALL_UNEXPECTED_RESPONSE] " + json.dumps(data, ensure_ascii=False, default=str)[:2000]) from exc
+            finish_reason = choice.get("finish_reason")
+            usage = data.get("usage")
+        else:
+            raise RuntimeError("[INVALID_BACKEND] LOCAL_AI_BACKEND must be openwebui, ollama, or gpt4all.")
+
+        inference_seconds = round(time.monotonic() - started, 3)
 
     return {
         "content": content,
-        "finish_reason": choice.get("finish_reason"),
-        "usage": data.get("usage"),
+        "finish_reason": finish_reason,
+        "usage": usage,
         "lock_wait_seconds": wait_seconds,
         "inference_seconds": inference_seconds,
     }
-
 
 # =============================================================================
 # Deterministic web search
@@ -590,34 +765,27 @@ def _search_one(query: str, max_results: int) -> dict[str, Any]:
     if not clean:
         return {"query": query, "ok": False, "results": [], "error": "Empty query"}
 
-    payload = {"queries": [clean]}
-
-    try:
-        response = _request_json(
-            "/api/v1/retrieval/process/web/search",
-            method="POST",
-            payload=payload,
-            timeout=HTTP_TIMEOUT_SEC,
-        )
-        results = _extract_search_items(
-            response,
-            max_results=max_results,
-        )
-        return {
-            "query": clean,
-            "ok": True,
-            "results": results,
-            "result_count": len(results),
-        }
-    except Exception as exc:
+    if not _search_available():
         return {
             "query": clean,
             "ok": False,
             "results": [],
             "result_count": 0,
-            "error": str(exc),
+            "error": "[SEARCH_UNAVAILABLE] No deterministic search backend is configured.",
         }
 
+    payload = {"queries": [clean]}
+    try:
+        response = _search_request(
+            "/api/v1/retrieval/process/web/search",
+            method="POST",
+            payload=payload,
+            timeout=HTTP_TIMEOUT_SEC,
+        )
+        results = _extract_search_items(response, max_results=max_results)
+        return {"query": clean, "ok": True, "results": results, "result_count": len(results)}
+    except Exception as exc:
+        return {"query": clean, "ok": False, "results": [], "result_count": 0, "error": str(exc)}
 
 def _search_many(
     queries: list[str],
@@ -1435,56 +1603,64 @@ def _validate_web_mode(web_mode: str) -> str:
 
 @mcp.tool()
 def local_ai_status(force_refresh: bool = False) -> dict[str, Any]:
-    """Check the local helper, OpenWebUI connectivity, model inventory and busy state."""
+    """Check the configured local model backend, inventory, search availability and busy state."""
     try:
         models = _local_models(force_refresh=force_refresh)
         ids = {model["id"] for model in models}
-
+        endpoint = {"openwebui": OPENWEBUI_URL, "ollama": OLLAMA_URL, "gpt4all": GPT4ALL_URL}.get(BACKEND)
         return {
             "ok": True,
             "bridge_version": BRIDGE_VERSION,
-            "openwebui_url": OPENWEBUI_URL,
+            "backend": BACKEND,
+            "backend_url": endpoint,
             "reachable": True,
             "model_count": len(models),
             "configured_default_model": DEFAULT_MODEL,
-            "default_model_available": DEFAULT_MODEL in ids,
-            "configured_default_web_model": DEFAULT_WEB_MODEL,
-            "default_web_model_available": DEFAULT_WEB_MODEL in ids,
+            "default_model_available": (DEFAULT_MODEL in ids) if DEFAULT_MODEL else None,
+            "configured_research_model": DEFAULT_WEB_MODEL,
+            "research_model_available": (DEFAULT_WEB_MODEL in ids) if DEFAULT_WEB_MODEL else None,
             "inference_busy": _mutex_busy(),
-            "one_inference_globally_enforced": True,
-            "web_search_method": "deterministic OpenWebUI retrieval endpoint",
+            "one_inference_per_worker_enforced": True,
+            "max_concurrent_inferences_for_this_worker": 1,
+            "mutex_name": MUTEX_NAME,
+            "concurrency_scope": "per-worker; different mutex names may run concurrently",
+            "search_backend": SEARCH_BACKEND,
+            "search_available": _search_available(),
             "supported_web_modes": ["auto", "never", "required"],
-            "max_research_rounds": MAX_RESEARCH_ROUNDS,
-            "max_total_research_results": MAX_TOTAL_RESEARCH_RESULTS,
+            "ollama_keep_alive": OLLAMA_KEEP_ALIVE if BACKEND == "ollama" else None,
+            "ollama_num_ctx": OLLAMA_NUM_CTX if BACKEND == "ollama" else None,
         }
     except Exception as exc:
         return {
             "ok": False,
             "bridge_version": BRIDGE_VERSION,
-            "openwebui_url": OPENWEBUI_URL,
-            "reachable": False,
+            "backend": BACKEND,
             "error": str(exc),
             "inference_busy": _mutex_busy(),
+            "max_concurrent_inferences_for_this_worker": 1,
+            "mutex_name": MUTEX_NAME,
+            "concurrency_scope": "per-worker; different mutex names may run concurrently",
+            "search_backend": SEARCH_BACKEND,
+            "search_available": _search_available(),
         }
 
 
 @mcp.tool()
 def list_local_models(force_refresh: bool = False) -> dict[str, Any]:
-    """List local Ollama-backed models and routing hints without running inference."""
+    """List models exposed by this worker's configured local model backend."""
     models = _local_models(force_refresh=force_refresh)
     ids = {model["id"] for model in models}
-
     return {
         "ok": True,
         "bridge_version": BRIDGE_VERSION,
+        "backend": BACKEND,
         "models": models,
         "count": len(models),
         "configured_default_model": DEFAULT_MODEL,
-        "default_model_available": DEFAULT_MODEL in ids,
-        "configured_default_web_model": DEFAULT_WEB_MODEL,
-        "default_web_model_available": DEFAULT_WEB_MODEL in ids,
+        "default_model_available": (DEFAULT_MODEL in ids) if DEFAULT_MODEL else None,
+        "configured_research_model": DEFAULT_WEB_MODEL,
+        "research_model_available": (DEFAULT_WEB_MODEL in ids) if DEFAULT_WEB_MODEL else None,
     }
-
 
 @mcp.tool()
 def search_local_web(
@@ -1542,7 +1718,7 @@ def ask_local_ai(
     In auto mode they are used if the planner decides web evidence is necessary.
 
     Resource/safety rules:
-    - Only one local LLM inference runs at any moment across bridge processes.
+    - Only one local LLM inference runs at a time for this worker; separate workers with different mutex names may run concurrently.
     - Web search itself is deterministic and does not rely on a model claiming it searched.
     - Local output is assistance, not ground truth. Codex must review important results.
     - The helper has no filesystem, shell or SSH privileges.
@@ -1610,6 +1786,19 @@ def ask_local_ai(
     # REQUIRED: bounded iterative deterministic research.
     # ---------------------------------------------------------------------
     if mode == "required":
+        if not _search_available():
+            return {
+                "ok": False,
+                "bridge_version": BRIDGE_VERSION,
+                "web_mode": mode,
+                "web_used": False,
+                "web_evidence_present": False,
+                "evidence_sufficient": False,
+                "content": "Current web evidence was required, but this worker has no deterministic search backend configured.",
+                "sources": [],
+                "warning": "Use the server research agent or configure SEARCH_BACKEND=openwebui.",
+            }
+
         selected_model, selection_mode = _resolve_model(
             model,
             task_type,
@@ -1745,6 +1934,22 @@ def ask_local_ai(
         }
 
     # NEED_WEB
+    if not _search_available():
+        return {
+            "ok": False,
+            "bridge_version": BRIDGE_VERSION,
+            "web_mode": mode,
+            "web_used": False,
+            "web_evidence_present": False,
+            "evidence_sufficient": False,
+            "decision": "NEED_WEB",
+            "reason": plan["reason"],
+            "model": planner_model,
+            "content": "The local model determined that current web evidence is needed, but this worker has no deterministic search backend configured.",
+            "sources": [],
+            "warning": "Use the server research agent or configure SEARCH_BACKEND=openwebui.",
+        }
+
     queries = explicit_queries or _derive_search_queries(task, plan["queries"])
 
     # Prefer the research model for web synthesis unless the caller explicitly chose one.

@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "sanitization_hits": [],
   "files": [
     ".gitignore",
@@ -12,6 +12,7 @@
     "config/env.example",
     "docs/alternative-backends.md",
     "docs/architecture.md",
+    "docs/multi-agent-orchestration.md",
     "docs/troubleshooting.md",
     "prompts/AGENTS.example.md",
     "prompts/codex-project-prompt.md",

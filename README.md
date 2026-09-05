@@ -1,6 +1,10 @@
 # Local AI Helper for Codex
 
-LAH is a low-privilege MCP helper that lets Codex use local LLM resources as additional coding, research, review and testing capacity.
+LAH is a low-privilege MCP helper that lets Codex use your local LLMs and hardware as additional coding, research, review and testing capacity.
+
+LAH is not intended to replace Codex or become a standalone AI assistant. Codex remains the senior orchestrator: it decides what work to delegate, evaluates the local workers' results, integrates their useful output, and remains responsible for final verification.
+
+The idea is simple: **let Codex handle the high-value judgement while suitable bounded work is delegated to local AI resources you already own.**
 
 The main goal is **better final outcomes through useful local compute**. Reducing unnecessary primary-model context/token use is a secondary optimisation, not a guarantee.
 
@@ -39,12 +43,13 @@ See `docs/architecture.md` and `docs/multi-agent-orchestration.md`.
 ## What LAH does
 
 - Gives Codex one or more local AI workers through MCP.
+- Allows independent workers on separate compute resources to work concurrently.
 - Delegates bounded first-pass coding, code review, tests, debugging hypotheses, summarisation and research.
 - Supports OpenWebUI, direct Ollama and GPT4All inference backends.
 - Keeps deterministic web search separate from model claims.
 - Lets research-capable workers inspect recorded search evidence and request bounded follow-up searches.
-- Keeps Codex responsible for architecture, integration, actual execution/testing, security-sensitive decisions and final output.
-- Gives local helpers no shell, SSH or arbitrary filesystem privileges.
+- Keeps Codex responsible for orchestration, architecture, integration, actual execution/testing, security-sensitive decisions and final verification.
+- Gives local AI workers no shell, SSH or arbitrary filesystem privileges.
 
 ## Concurrency model
 
